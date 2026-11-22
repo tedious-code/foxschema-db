@@ -3,7 +3,7 @@
  * Copyright 2024-2026 Huy Phan <huyplb@gmail.com>
  * SPDX-License-Identifier: Apache-2.0
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -62,5 +62,48 @@ describe('duckDbAdapter external-access lock', () => {
     await expect(duckDbAdapter.acquire(join(dir, 'foxschema.db'), {}, false)).rejects.toThrow(
       /internal metadata database/i,
     );
+  });
+});
+
+describe('duckDbAdapter backup folder', () => {
+  const root = mkdtempSync(join(tmpdir(), 'fox-duckdb-backup-'));
+  const backups = join(root, 'backups');
+  const outside = join(root, 'outside');
+  const sq = (p: string) => `'${p.replace(/'/g, "''")}'`;
+  const previous = process.env.FOX_DUCKDB_BACKUP_DIR;
+
+  afterAll(async () => {
+    if (previous === undefined) delete process.env.FOX_DUCKDB_BACKUP_DIR;
+    else process.env.FOX_DUCKDB_BACKUP_DIR = previous;
+    await duckDbAdapter.closeAll();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('lets the Backup panel export into FOX_DUCKDB_BACKUP_DIR and nowhere else', async () => {
+    mkdirSync(backups);
+    mkdirSync(outside);
+    process.env.FOX_DUCKDB_BACKUP_DIR = backups;
+    const handle = await duckDbAdapter.acquire(join(root, 'data.duckdb'), {}, false);
+    await duckDbAdapter.query(handle, 'CREATE TABLE t AS SELECT 1 AS x', []);
+
+    // What the Backup panel runs: EXPORT DATABASE into a new folder inside it.
+    await duckDbAdapter.query(handle, `EXPORT DATABASE ${sq(join(backups, 'b1'))} (FORMAT PARQUET)`, []);
+    expect(existsSync(join(backups, 'b1', 't.parquet'))).toBe(true);
+
+    const blocked = /file system operations are disabled|permission/i;
+    await expect(
+      duckDbAdapter.query(handle, `EXPORT DATABASE ${sq(join(outside, 'b2'))} (FORMAT PARQUET)`, []),
+    ).rejects.toThrow(blocked);
+    await expect(
+      duckDbAdapter.query(handle, `EXPORT DATABASE ${sq(`${backups}/../outside/b3`)} (FORMAT PARQUET)`, []),
+    ).rejects.toThrow(blocked);
+    // A sibling whose name only starts like the folder is not inside it.
+    mkdirSync(`${backups}-evil`);
+    await expect(
+      duckDbAdapter.query(handle, `EXPORT DATABASE ${sq(join(`${backups}-evil`, 'b4'))} (FORMAT PARQUET)`, []),
+    ).rejects.toThrow(blocked);
+    await expect(
+      duckDbAdapter.query(handle, "SET allowed_directories = ['/']", []),
+    ).rejects.toThrow(/configuration has been locked/i);
   });
 });
