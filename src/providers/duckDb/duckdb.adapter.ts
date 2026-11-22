@@ -1,6 +1,21 @@
+import { resolve, sep } from 'node:path';
 import { type ConnectionOptions, type DriverAdapter } from '@foxschema/sql';
 import { requireDriver } from '../../cores/driver-loader.js';
 import { assertSafeEmbeddedDatabasePath } from '../../cores/embedded-db-guard.js';
+
+/**
+ * The one folder DuckDB SQL may write to or read from: where the Backup panel
+ * exports to. `FOX_DUCKDB_BACKUP_DIR`, or `./backups` (the panel's default
+ * folder) resolved against the server's working directory. Read when a
+ * connection opens. Nothing creates it; a backup needs it to exist.
+ */
+export function duckDbBackupDir(): string {
+  return resolve(process.env.FOX_DUCKDB_BACKUP_DIR || 'backups');
+}
+
+function sqlLiteral(text: string): string {
+  return `'${text.replace(/'/g, "''")}'`;
+}
 
 interface DuckHandle {
   instance: any;
@@ -41,6 +56,12 @@ class DuckDbAdapter implements DriverAdapter {
         // `read_csv`, `ATTACH`, `COPY ... TO/FROM`, extension installs) at the
         // DuckDB engine layer and lock configuration so user SQL cannot re-enable
         // it to read FoxSchema's internal DB or encryption key.
+        //
+        // One folder stays reachable: the backups folder, so the Backup panel's
+        // EXPORT DATABASE can write there. DuckDB refuses `..` escapes and
+        // siblings that only share a name prefix, and the lock below stops SQL
+        // widening the list.
+        await conn.run(`SET allowed_directories = [${sqlLiteral(duckDbBackupDir() + sep)}]`);
         await conn.run('SET enable_external_access = false');
         await conn.run('SET lock_configuration = true');
         return { instance, conn };
